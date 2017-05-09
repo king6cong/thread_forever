@@ -12,7 +12,6 @@ pub use thread_handle::ThreadHandle;
 
 pub trait Payload {
     type Result;
-    fn new() -> Self;
     fn name(&self) -> String;
     fn thread_func(&self) -> Self::Result;
 }

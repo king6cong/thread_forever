@@ -10,9 +10,9 @@ pub struct ThreadWorker<T> {
 impl<T> ThreadWorker<T>
     where T: ::Payload + Clone + Send + 'static
 {
-    pub fn new() -> Self {
+    pub fn new(payload: T) -> Self {
         ThreadWorker {
-            payload: T::new(),
+            payload: payload,
             handle: ThreadHandle::new(),
         }
     }
