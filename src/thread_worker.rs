@@ -36,7 +36,7 @@ impl<T> ThreadWorker<T>
                           let handle = handle.clone();
                           let payload = payload.clone();
                           thread::Builder::new()
-                              .name(format!("t:{:?}", name))
+                              .name(format!("t:{}", name))
                               .spawn(move || -> Result<()> {
 
                                          handle.notify_thread_up();
