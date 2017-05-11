@@ -31,7 +31,7 @@ impl ThreadHandle {
                    *result.0);
             status = result.0;
             if let ThreadStatus::Up = *status {
-                info!("wait_for_thread_up: exit");
+                trace!("wait_for_thread_up: exit");
                 break;
             }
         }
@@ -41,7 +41,7 @@ impl ThreadHandle {
         let (ref lock, ref cvar) = *self.status;
         let mut status = lock.lock().unwrap();
         *status = ThreadStatus::Up;
-        info!("notify the condvar that thread is up.");
+        debug!("notify the condvar that thread is up.");
         cvar.notify_one();
     }
 

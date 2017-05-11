@@ -31,7 +31,7 @@ impl<T> ThreadWorker<T>
         let _ = thread::Builder::new()
             .name(format!("t:{}_watchdog", name))
             .spawn(move || -> Result<()> {
-                info!("{}_watchdog started!", name);
+                debug!("{}_watchdog started!", name);
                 while {
                           let handle = handle.clone();
                           let payload = payload.clone();
