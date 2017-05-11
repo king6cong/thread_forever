@@ -1,6 +1,7 @@
 use std::thread;
 use thread_handle::ThreadHandle;
 pub use errors::*;
+use Payload;
 
 pub struct ThreadWorker<T> {
     pub payload: T,
@@ -8,7 +9,7 @@ pub struct ThreadWorker<T> {
 }
 
 impl<T> ThreadWorker<T>
-    where T: ::Payload + Clone + Send + 'static
+    where T: Payload + Clone + Send + 'static
 {
     pub fn new(payload: T) -> Self {
         ThreadWorker {
@@ -54,5 +55,53 @@ impl<T> ThreadWorker<T>
             });
 
         self.handle.wait_for_thread_up();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)]
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_thread_forever() {
+
+        lazy_static! {
+            pub static ref WORKER: ThreadWorker<Test> = {
+                let payload = Test::new();
+                let worker = ThreadWorker::new(payload);
+                worker
+            };
+        }
+
+        #[derive(Clone)]
+        pub struct Test {}
+
+        impl Payload for Test {
+            type Result = Result<()>;
+
+            fn name(&self) -> String {
+                "thread_forever_test".to_string()
+            }
+
+            fn thread_func(&self) -> Result<()> {
+                loop {
+                    thread::sleep(Duration::from_millis(200));
+                    println!("one loop iter");
+                }
+            }
+        }
+
+        impl Test {
+            fn new() -> Self {
+                Test {}
+            }
+        }
+
+        WORKER.spin_up();
+        WORKER.spin_up();
+        WORKER.spin_up();
+        thread::sleep(Duration::from_millis(600));
     }
 }

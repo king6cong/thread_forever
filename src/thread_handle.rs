@@ -54,6 +54,10 @@ impl ThreadHandle {
                 *status = ThreadStatus::Pending;
                 true
             }
+            ThreadStatus::Pending => {
+                self.wait_for_thread_up();
+                false
+            }
             _ => false,
         }
     }
