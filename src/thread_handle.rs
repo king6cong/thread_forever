@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex, Condvar};
 use std::time::Duration;
+use std::sync::MutexGuard;
 
 #[derive(Debug, PartialEq)]
 enum ThreadStatus {
@@ -19,10 +20,7 @@ impl ThreadHandle {
         ThreadHandle { status: Arc::new((Mutex::new(ThreadStatus::Uninitialized), Condvar::new())) }
     }
 
-    pub fn wait_for_thread_up(&self) {
-        let (ref lock, ref cvar) = *self.status.clone();
-        let mut status = lock.lock().unwrap();
-        trace!("wait_for_thread_up: enter");
+    fn wait(mut status: MutexGuard<ThreadStatus>, cvar: &Condvar) {
         loop {
             let result = cvar.wait_timeout(status, Duration::from_millis(10))
                 .unwrap();
@@ -35,10 +33,15 @@ impl ThreadHandle {
                 break;
             }
         }
-        // while *status != ThreadStatus::Up {
-        //     status = cvar.wait(status).unwrap();
-        //     trace!("waked up: {:?}", *status);
-        // }
+    }
+
+    pub fn wait_for_thread_up(&self) {
+        let (ref lock, ref cvar) = *self.status.clone();
+        let status = lock.lock().unwrap();
+        trace!("wait_for_thread_up: enter");
+
+        Self::wait(status, cvar);
+
         trace!("wait_for_thread_up: exit");
     }
 
@@ -63,24 +66,7 @@ impl ThreadHandle {
             ThreadStatus::Pending => {
                 trace!("pending wait 0");
 
-                // while *status != ThreadStatus::Up {
-                //     status = cvar.wait(status).unwrap();
-                //     trace!("pending waked up: {:?}", *status);
-                // }
-
-
-                loop {
-                    let result = cvar.wait_timeout(status, Duration::from_millis(10))
-                        .unwrap();
-                    trace!("thread_need_init: 10 ms passed: result: {:?} {:?}",
-                           result,
-                           *result.0);
-                    status = result.0;
-                    if let ThreadStatus::Up = *status {
-                        trace!("wait_for_thread_up: exit");
-                        break;
-                    }
-                }
+                Self::wait(status, cvar);
 
                 trace!("pending wait 1");
                 false

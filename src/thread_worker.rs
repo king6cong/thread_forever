@@ -1,9 +1,5 @@
 use std::thread;
-// use std;
 use std::time::Duration;
-// use std::panic;
-// use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Arc};
-// use thread_handle::ThreadHandle;
 pub use errors::*;
 use Payload;
 
