@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex, Condvar};
-// use std::time::Duration;
+use std::time::Duration;
 
 #[derive(Debug, PartialEq)]
 enum ThreadStatus {
@@ -23,22 +23,22 @@ impl ThreadHandle {
         let (ref lock, ref cvar) = *self.status.clone();
         let mut status = lock.lock().unwrap();
         trace!("wait_for_thread_up: enter");
-        // loop {
-        //     let result = cvar.wait_timeout(status, Duration::from_millis(10))
-        //         .unwrap();
-        //     debug!("10 milliseconds have passed: result: {:?} {:?}",
-        //            result,
-        //            *result.0);
-        //     status = result.0;
-        //     if let ThreadStatus::Up = *status {
-        //         trace!("wait_for_thread_up: exit");
-        //         break;
-        //     }
-        // }
-        while *status != ThreadStatus::Up {
-            status = cvar.wait(status).unwrap();
-            trace!("waked up: {:?}", *status);
+        loop {
+            let result = cvar.wait_timeout(status, Duration::from_millis(10))
+                .unwrap();
+            trace!("wait_for_thread_up: 10 ms passed: result: {:?} {:?}",
+                   result,
+                   *result.0);
+            status = result.0;
+            if let ThreadStatus::Up = *status {
+                trace!("wait_for_thread_up: exit");
+                break;
+            }
         }
+        // while *status != ThreadStatus::Up {
+        //     status = cvar.wait(status).unwrap();
+        //     trace!("waked up: {:?}", *status);
+        // }
         trace!("wait_for_thread_up: exit");
     }
 
@@ -62,10 +62,26 @@ impl ThreadHandle {
             }
             ThreadStatus::Pending => {
                 trace!("pending wait 0");
-                while *status != ThreadStatus::Up {
-                    status = cvar.wait(status).unwrap();
-                    trace!("pending waked up: {:?}", *status);
+
+                // while *status != ThreadStatus::Up {
+                //     status = cvar.wait(status).unwrap();
+                //     trace!("pending waked up: {:?}", *status);
+                // }
+
+
+                loop {
+                    let result = cvar.wait_timeout(status, Duration::from_millis(10))
+                        .unwrap();
+                    trace!("thread_need_init: 10 ms passed: result: {:?} {:?}",
+                           result,
+                           *result.0);
+                    status = result.0;
+                    if let ThreadStatus::Up = *status {
+                        trace!("wait_for_thread_up: exit");
+                        break;
+                    }
                 }
+
                 trace!("pending wait 1");
                 false
             }

@@ -1,13 +1,14 @@
 use std::thread;
+// use std;
+use std::time::Duration;
+// use std::panic;
 // use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Arc};
-use thread_handle::ThreadHandle;
+// use thread_handle::ThreadHandle;
 pub use errors::*;
 use Payload;
 
 pub struct ThreadWorker<T> {
-    // payload: Arc<RwLock<T>>,
     pub payload: T,
-    handle: ThreadHandle,
     name: String,
 }
 
@@ -17,19 +18,16 @@ impl<T> ThreadWorker<T>
     pub fn new(payload: T) -> Self {
         let name = payload.name();
         ThreadWorker {
-            // payload: Arc::new(RwLock::new(payload)),
             payload: payload,
-            handle: ThreadHandle::new(),
             name: name,
         }
     }
 
     pub fn spin_up(&self) {
-        let handle = self.handle.clone();
         let payload = self.payload.clone();
         let name = self.name.clone();
         trace!("0");
-        if !self.handle.thread_need_init() {
+        if !self.payload.handle().thread_need_init() {
             info!("{} worker already initialized, return directly!", name);
             return;
         }
@@ -39,30 +37,29 @@ impl<T> ThreadWorker<T>
             .name(format!("t:{}_watchdog", name))
             .spawn(move || -> Result<()> {
                 trace!("{}_watchdog spawn", name);
-                while {
-                          let handle = handle.clone();
-                          let payload = payload.clone();
-                          thread::Builder::new()
-                              .name(format!("t:{}", name))
-                              .spawn(move || -> Result<()> {
-                        trace!("2");
-                        handle.notify_thread_up();
-                        trace!("3");
 
-                        let _ = payload.thread_func();
+                loop {
+                    let payload = payload.clone();
+                    let name_clone = name.clone();
+                    let _ = thread::Builder::new()
+                        .name(format!("t:{}", name))
+                        .spawn(move || -> Result<()> {
+                            trace!("2");
+                            // handle.notify_thread_up();
+                            trace!("3");
 
+                            let result = payload.thread_func();
+                            error!("thread_func of {} exited: {:?}", name_clone, result);
 
-                        Ok(())
-                    })?
-                              .join()
-                              .is_err()
-                      } {
+                            Ok(())
+                        })?
+                        .join();
+                    thread::sleep(Duration::from_millis(600));
                     warn!("{} worker respawn!", name);
                 }
-                Ok(())
             });
         trace!("4");
-        self.handle.wait_for_thread_up();
+        self.payload.handle().wait_for_thread_up();
         trace!("5");
     }
 }
@@ -72,7 +69,7 @@ mod tests {
     extern crate env_logger;
     #[allow(unused_imports)]
     use super::*;
-    use std::time::Duration;
+    use thread_handle::ThreadHandle;
 
     lazy_static! {
         pub static ref WORKER: ThreadWorker<Test> = {
@@ -83,7 +80,9 @@ mod tests {
     }
 
     #[derive(Clone)]
-    pub struct Test {}
+    pub struct Test {
+        handle: ThreadHandle,
+    }
 
     impl Payload for Test {
         type Result = Result<()>;
@@ -93,16 +92,24 @@ mod tests {
         }
 
         fn thread_func(&self) -> Result<()> {
+            self.handle.notify_thread_up();
+            // panic!("panic test");
+            // return Err(Error::from("error test"));
+
             loop {
-                thread::sleep(Duration::from_millis(200));
+                thread::sleep(Duration::from_millis(100));
                 info!("one loop iter");
             }
+        }
+
+        fn handle(&self) -> &ThreadHandle {
+            &self.handle
         }
     }
 
     impl Test {
         fn new() -> Self {
-            Test {}
+            Test { handle: ThreadHandle::new() }
         }
         fn test_read(&self) {
             info!("test_read");
@@ -116,7 +123,7 @@ mod tests {
         WORKER.spin_up();
         WORKER.spin_up();
         WORKER.payload.test_read();
-        thread::sleep(Duration::from_millis(600));
+        thread::sleep(Duration::from_millis(2000));
     }
 
     #[test]
