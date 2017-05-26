@@ -28,9 +28,8 @@ pub trait Payload {
     fn thread_func(&self) -> Self::Result;
     fn handle(&self) -> &ThreadHandle;
     fn on_error(&self, result: &Self::Result) -> RetryMethod {
-        info!("on_error: {:?}", result);
         let retry = RetryMethod::Retry { after: Duration::from_millis(2000) };
-        info!("retry: {:?}", retry);
+        trace!("on_error: {:?} retry: {:?}", result, retry);
         retry
     }
 }

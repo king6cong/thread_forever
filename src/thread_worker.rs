@@ -22,12 +22,11 @@ impl<T> ThreadWorker<T>
     pub fn spin_up(&self) {
         let payload = self.payload.clone();
         let name = self.name.clone();
-        trace!("0");
+
         if !self.payload.handle().thread_need_init() {
-            info!("{} worker already initialized, return directly!", name);
+            info!("{} worker already initialized, return", name);
             return;
         }
-        trace!("1");
 
         let _ = thread::Builder::new()
             .name(format!("t:{}_watchdog", name))
@@ -42,7 +41,7 @@ impl<T> ThreadWorker<T>
                         .spawn(move || -> Result<RetryMethod> {
                             let result = payload.thread_func();
                             let retry_method = payload.on_error(&result);
-                            error!("thread_func of {} exited: {:?} retry_method: {:?}",
+                            info!("thread_func of {} exited: {:?} retry_method: {:?}",
                                    name_clone,
                                    result,
                                    retry_method);
@@ -62,7 +61,6 @@ impl<T> ThreadWorker<T>
                                     info!("retry_method sleep: {:?}", after);
                                 }
                                 Ok(RetryMethod::Abort) => {
-                                    info!("retry_method break");
                                     break;
                                 }
                                 Err(e) => {
@@ -71,7 +69,7 @@ impl<T> ThreadWorker<T>
                             }
                         }
                         Err(error) => {
-                            info!("thread error: {:?}, should be caused by a panic", error);
+                            warn!("thread error: {:?}, should be caused by a panic", error);
                             thread::sleep(Duration::from_millis(1000));
                         }
                     }
