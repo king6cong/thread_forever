@@ -8,6 +8,7 @@ extern crate log;
 extern crate error_chain;
 
 use std::fmt;
+use std::time::Duration;
 mod thread_handle;
 mod thread_worker;
 mod errors;
@@ -15,12 +16,23 @@ pub use errors::*;
 pub use thread_worker::ThreadWorker;
 pub use thread_handle::ThreadHandle;
 
+#[derive(Debug)]
+pub enum RetryMethod {
+    Retry { after: Duration },
+    Abort,
+}
+
 pub trait Payload {
     type Result: fmt::Debug;
     fn name(&self) -> String;
     fn thread_func(&self) -> Self::Result;
-    // fn thread_func(&self) -> std::result::Result;
     fn handle(&self) -> &ThreadHandle;
+    fn on_error(&self, result: &Self::Result) -> RetryMethod {
+        info!("on_error: {:?}", result);
+        let retry = RetryMethod::Retry { after: Duration::from_millis(2000) };
+        info!("retry: {:?}", retry);
+        retry
+    }
 }
 
 #[cfg(test)]

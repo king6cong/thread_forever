@@ -1,7 +1,7 @@
 use std::thread;
 use std::time::Duration;
 pub use errors::*;
-use Payload;
+use {Payload, RetryMethod};
 
 pub struct ThreadWorker<T> {
     pub payload: T,
@@ -37,26 +37,49 @@ impl<T> ThreadWorker<T>
                 loop {
                     let payload = payload.clone();
                     let name_clone = name.clone();
-                    let _ = thread::Builder::new()
+                    let thread_result = thread::Builder::new()
                         .name(format!("t:{}", name))
-                        .spawn(move || -> Result<()> {
-                            trace!("2");
-                            // handle.notify_thread_up();
-                            trace!("3");
-
+                        .spawn(move || -> Result<RetryMethod> {
                             let result = payload.thread_func();
-                            error!("thread_func of {} exited: {:?}", name_clone, result);
+                            let retry_method = payload.on_error(&result);
+                            error!("thread_func of {} exited: {:?} retry_method: {:?}",
+                                   name_clone,
+                                   result,
+                                   retry_method);
 
-                            Ok(())
+                            Ok(retry_method)
                         })?
                         .join();
-                    thread::sleep(Duration::from_millis(600));
-                    warn!("{} worker respawn!", name);
+                    warn!("{} worker respawn, thread_result: {:?}",
+                          name,
+                          thread_result);
+
+                    match thread_result {
+                        Ok(retry_method) => {
+                            match retry_method {
+                                Ok(RetryMethod::Retry { after }) => {
+                                    thread::sleep(after);
+                                    info!("retry_method sleep: {:?}", after);
+                                }
+                                Ok(RetryMethod::Abort) => {
+                                    info!("retry_method break");
+                                    break;
+                                }
+                                Err(e) => {
+                                    error!("unexpected error: {:?}", e);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            info!("thread error: {:?}, should be caused by a panic", error);
+                            thread::sleep(Duration::from_millis(1000));
+                        }
+                    }
+
                 }
+                Ok(())
             });
-        trace!("4");
         self.payload.handle().wait_for_thread_up();
-        trace!("5");
     }
 }
 
@@ -73,6 +96,13 @@ mod tests {
             let worker = ThreadWorker::new(payload);
             worker
         };
+
+        pub static ref WORKER_FAIL: ThreadWorker<TestFail> = {
+            let payload = TestFail::new();
+            let worker = ThreadWorker::new(payload);
+            worker
+        };
+
     }
 
     #[derive(Clone)]
@@ -89,8 +119,6 @@ mod tests {
 
         fn thread_func(&self) -> Result<()> {
             self.handle.notify_thread_up();
-            // panic!("panic test");
-            // return Err(Error::from("error test"));
 
             loop {
                 thread::sleep(Duration::from_millis(100));
@@ -136,4 +164,69 @@ mod tests {
     fn test_3() {
         test_thread_forever();
     }
+
+
+    /// failure test
+    #[derive(Clone)]
+    pub struct TestFail {
+        handle: ThreadHandle,
+    }
+
+    impl Payload for TestFail {
+        type Result = Result<()>;
+
+        fn name(&self) -> String {
+            "thread_forever_test".to_string()
+        }
+
+        fn thread_func(&self) -> Result<()> {
+            self.handle.notify_thread_up();
+            // panic!("panic test");
+            return Err(Error::from("error test"));
+        }
+
+        fn handle(&self) -> &ThreadHandle {
+            &self.handle
+        }
+
+        fn on_error(&self, result: &Self::Result) -> RetryMethod {
+            info!("on_error: {:?}", result);
+            // panic!("panic test");
+            // let retry = RetryMethod::Retry { after: Duration::from_millis(1000) };
+            let retry = RetryMethod::Abort;
+            info!("retry: {:?}", retry);
+            retry
+        }
+    }
+
+    impl TestFail {
+        fn new() -> Self {
+            TestFail { handle: ThreadHandle::new() }
+        }
+    }
+
+    fn test_thread_forever_fail() {
+        let _ = env_logger::init();
+        WORKER_FAIL.spin_up();
+        WORKER_FAIL.spin_up();
+        WORKER_FAIL.spin_up();
+        WORKER_FAIL.spin_up();
+        thread::sleep(Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn test_fail_1() {
+        test_thread_forever_fail();
+    }
+
+    #[test]
+    fn test_fail_2() {
+        test_thread_forever_fail();
+    }
+
+    #[test]
+    fn test_fail_3() {
+        test_thread_forever_fail();
+    }
+
 }
