@@ -40,7 +40,7 @@ impl<T> ThreadWorker<T>
                         .name(format!("t:{}", name))
                         .spawn(move || -> Result<RetryMethod> {
                             let result = payload.thread_func();
-                            let retry_method = payload.on_error(&result);
+                            let retry_method = payload.on_exit(&result);
                             info!("thread_func of {} exited: {:?} retry_method: {:?}",
                                    name_clone,
                                    result,
@@ -187,8 +187,8 @@ mod tests {
             &self.handle
         }
 
-        fn on_error(&self, result: &Self::Result) -> RetryMethod {
-            info!("on_error: {:?}", result);
+        fn on_exit(&self, result: &Self::Result) -> RetryMethod {
+            info!("on_exit: {:?}", result);
             // panic!("panic test");
             // let retry = RetryMethod::Retry { after: Duration::from_millis(1000) };
             let retry = RetryMethod::Abort;
