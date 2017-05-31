@@ -8,6 +8,7 @@ extern crate log;
 extern crate error_chain;
 
 use std::fmt;
+use std::thread;
 use std::time::Duration;
 mod thread_handle;
 mod thread_worker;
@@ -27,8 +28,12 @@ pub trait Payload {
     fn name(&self) -> String;
     fn thread_func(&self) -> Self::Result;
     fn handle(&self) -> &ThreadHandle;
-    fn on_exit(&self, result: &Self::Result) -> RetryMethod {
-        let retry = RetryMethod::Retry { after: Duration::from_millis(2000) };
+    /// on_exit will be called with catch_unwind result of thread_func
+    fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
+        let retry = match *result {
+            Ok(_) => RetryMethod::Retry { after: Duration::from_millis(2000) },
+            Err(_) => RetryMethod::Retry { after: Duration::from_millis(0) },
+        };
         trace!("on_exit: {:?} retry: {:?}", result, retry);
         retry
     }

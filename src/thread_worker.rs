@@ -2,6 +2,7 @@ use std::thread;
 use std::time::Duration;
 pub use errors::*;
 use {Payload, RetryMethod};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub struct ThreadWorker<T> {
     pub payload: T,
@@ -39,12 +40,12 @@ impl<T> ThreadWorker<T>
                     let thread_result = thread::Builder::new()
                         .name(format!("t:{}", name))
                         .spawn(move || -> Result<RetryMethod> {
-                            let result = payload.thread_func();
+                            let result = catch_unwind(AssertUnwindSafe(|| payload.thread_func()));
                             let retry_method = payload.on_exit(&result);
                             info!("thread_func of {} exited: {:?} retry_method: {:?}",
-                                   name_clone,
-                                   result,
-                                   retry_method);
+                                  name_clone,
+                                  result,
+                                  retry_method);
 
                             Ok(retry_method)
                         })?
@@ -75,6 +76,7 @@ impl<T> ThreadWorker<T>
                     }
 
                 }
+                info!("{}_watchdog exit", name);
                 Ok(())
             });
         self.payload.handle().wait_for_thread_up();
@@ -187,7 +189,7 @@ mod tests {
             &self.handle
         }
 
-        fn on_exit(&self, result: &Self::Result) -> RetryMethod {
+        fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
             info!("on_exit: {:?}", result);
             // panic!("panic test");
             // let retry = RetryMethod::Retry { after: Duration::from_millis(1000) };
