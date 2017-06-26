@@ -9,6 +9,8 @@ pub struct ThreadWorker<T> {
     name: String,
 }
 
+const DEFAULT_SLEEP: u64 = 1000;
+
 impl<T> ThreadWorker<T>
     where T: Payload + Clone + Send + Sync + 'static
 {
@@ -20,66 +22,50 @@ impl<T> ThreadWorker<T>
         }
     }
 
-    pub fn spin_up(&self) {
+    pub fn spin_up(&self) -> Result<()> {
         let payload = self.payload.clone();
         let name = self.name.clone();
 
         if !self.payload.handle().thread_need_init() {
-            info!("{} worker already initialized, return", name);
-            return;
+            info!("t:{} inited, no-op", name);
+            return Ok(());
         }
 
-        let _ = thread::Builder::new()
-            .name(format!("t:{}_watchdog", name))
+        let payload = payload.clone();
+        let name_clone = name.clone();
+        let thread_result = thread::Builder::new()
+            .name(format!("t:{}", name))
             .spawn(move || -> Result<()> {
-                trace!("{}_watchdog spawn", name);
-
                 loop {
-                    let payload = payload.clone();
-                    let name_clone = name.clone();
-                    let thread_result = thread::Builder::new()
-                        .name(format!("t:{}", name))
-                        .spawn(move || -> Result<RetryMethod> {
-                            let result = catch_unwind(AssertUnwindSafe(|| payload.thread_func()));
-                            let retry_method = payload.on_exit(&result);
-                            info!("thread_func of {} exited: {:?} retry_method: {:?}",
-                                  name_clone,
-                                  result,
-                                  retry_method);
+                    let result = catch_unwind(AssertUnwindSafe(|| payload.thread_func()));
+                    let retry_method = catch_unwind(AssertUnwindSafe(|| payload.on_exit(&result)));
 
-                            Ok(retry_method)
-                        })?
-                        .join();
-                    warn!("{} worker respawn, thread_result: {:?}",
-                          name,
-                          thread_result);
+                    info!("t:{} <thread_func> exited: <{:?}> retry_method: <{:?}>",
+                          name_clone,
+                          result,
+                          retry_method);
 
-                    match thread_result {
-                        Ok(retry_method) => {
-                            match retry_method {
-                                Ok(RetryMethod::Retry { after }) => {
-                                    thread::sleep(after);
-                                    info!("retry_method sleep: {:?}", after);
-                                }
-                                Ok(RetryMethod::Abort) => {
-                                    break;
-                                }
-                                Err(e) => {
-                                    error!("unexpected error: {:?}", e);
-                                }
-                            }
+                    match retry_method {
+                        Ok(RetryMethod::Retry { after }) => {
+                            info!("t:{} retry in: {:?}", name_clone, after);
+                            thread::sleep(after);
                         }
-                        Err(error) => {
-                            warn!("thread error: {:?}, should be caused by a panic", error);
-                            thread::sleep(Duration::from_millis(1000));
+                        Ok(RetryMethod::Abort) => {
+                            error!("t:{} aborted", name_clone);
+                            break;
+                        }
+                        Err(e) => {
+                            error!("t:{}: <on_exit> panicked: {:?}", name_clone, e);
+                            thread::sleep(Duration::from_millis(DEFAULT_SLEEP));
                         }
                     }
-
                 }
-                info!("{}_watchdog exit", name);
+
                 Ok(())
-            });
+            })?;
+
         self.payload.handle().wait_for_thread_up();
+        Ok(())
     }
 }
 
@@ -182,7 +168,8 @@ mod tests {
         fn thread_func(&self) -> Result<()> {
             self.handle.notify_thread_up();
             // panic!("panic test");
-            return Err(Error::from("error test"));
+            // Ok(())
+            Err(Error::from("error"))
         }
 
         fn handle(&self) -> &ThreadHandle {
@@ -190,11 +177,10 @@ mod tests {
         }
 
         fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
-            info!("on_exit: {:?}", result);
+            trace!("on_exit: {:?}", result);
             // panic!("panic test");
             // let retry = RetryMethod::Retry { after: Duration::from_millis(1000) };
             let retry = RetryMethod::Abort;
-            info!("retry: {:?}", retry);
             retry
         }
     }
