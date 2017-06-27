@@ -14,7 +14,7 @@ mod thread_handle;
 mod thread_worker;
 mod errors;
 pub use errors::*;
-pub use thread_worker::ThreadWorker;
+pub use thread_worker::{ThreadWorker, Handle};
 pub use thread_handle::ThreadHandle;
 
 #[derive(Debug)]
@@ -23,11 +23,17 @@ pub enum RetryMethod {
     Abort,
 }
 
+#[derive(Debug, Clone)]
+pub enum Cmd {
+    Restart,
+    Noop,
+}
+
 pub trait Payload {
     type Result: fmt::Debug;
     fn name(&self) -> String;
     fn thread_func(&self) -> Self::Result;
-    fn handle(&self) -> &ThreadHandle;
+    fn handle(&self) -> &Handle;
     /// on_exit will be called with catch_unwind result of thread_func
     fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
         let retry = match *result {

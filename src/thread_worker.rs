@@ -3,6 +3,11 @@ use std::time::Duration;
 pub use errors::*;
 use {Payload, RetryMethod};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use thread_handle::ThreadHandle;
+use std::sync::Arc;
+use std::sync::RwLock;
+use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+use ::Cmd;
 
 pub struct ThreadWorker<T> {
     pub payload: T,
@@ -26,7 +31,7 @@ impl<T> ThreadWorker<T>
         let payload = self.payload.clone();
         let name = self.name.clone();
 
-        if !self.payload.handle().thread_need_init() {
+        if !self.handle().thread_need_init() {
             info!("t:{} inited, no-op", name);
             return Ok(());
         }
@@ -64,17 +69,84 @@ impl<T> ThreadWorker<T>
                 Ok(())
             })?;
 
-        self.payload.handle().wait_for_thread_up();
+        self.handle().wait_for_thread_up();
         Ok(())
     }
+
+    pub fn handle(&self) -> &Handle {
+        self.payload.handle()
+    }
 }
+
+pub trait RW<T> {
+    fn read_lock(&self) -> RwLockReadGuard<T>;
+    fn write_lock(&self) -> RwLockWriteGuard<T>;
+}
+
+impl<T> RW<T> for RwLock<T> {
+    fn read_lock(&self) -> RwLockReadGuard<T> {
+        self.read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    fn write_lock(&self) -> RwLockWriteGuard<T> {
+        self.write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[derive(Clone)]
+pub struct Handle {
+    handle: ThreadHandle,
+    cmd: Arc<RwLock<Cmd>>,
+}
+
+impl Handle {
+    pub fn new() -> Self {
+        Handle {
+            handle: ThreadHandle::new(),
+            cmd: Arc::new(RwLock::new(Cmd::Noop)),
+        }
+    }
+    pub fn wait_for_thread_up(&self) {
+        self.handle.wait_for_thread_up()
+    }
+
+    pub fn notify_thread_up(&self) {
+        self.handle.notify_thread_up()
+    }
+
+    pub fn thread_need_init(&self) -> bool {
+        self.handle.thread_need_init()
+    }
+
+    pub fn set_cmd(&self, cmd: Cmd) -> Result<()> {
+        *self.cmd.write_lock() = cmd;
+        Ok(())
+    }
+
+    pub fn check_and_reset_cmd(&self) -> Cmd {
+        trace!("CHECK_CMD: {:?}", self.cmd);
+        let cmd = self.cmd.read_lock().clone();
+        match cmd {
+            Cmd::Restart => {
+                *self.cmd.write_lock() = Cmd::Noop;
+                Cmd::Restart
+            }
+            _ => Cmd::Noop
+        }
+    }
+}
+
+impl Default for Handle {
+    fn default() -> Self { Handle::new() }
+}
+
 
 #[cfg(test)]
 mod tests {
     extern crate env_logger;
     #[allow(unused_imports)]
     use super::*;
-    use thread_handle::ThreadHandle;
 
     lazy_static! {
         pub static ref WORKER: ThreadWorker<Test> = {
@@ -88,19 +160,18 @@ mod tests {
             let worker = ThreadWorker::new(payload);
             worker
         };
-
     }
 
     #[derive(Clone)]
     pub struct Test {
-        handle: ThreadHandle,
+        handle: Handle,
     }
 
     impl Payload for Test {
         type Result = Result<()>;
 
         fn name(&self) -> String {
-            "thread_forever_test".to_string()
+            "Test".to_string()
         }
 
         fn thread_func(&self) -> Result<()> {
@@ -108,18 +179,23 @@ mod tests {
 
             loop {
                 thread::sleep(Duration::from_millis(100));
-                info!("one loop iter");
+                let cmd = self.handle.check_and_reset_cmd();
+                info!("iter, cmd: {:?}", cmd);
+                match cmd {
+                    Cmd::Restart => return Ok(()),
+                    _ => {},
+                }
             }
         }
 
-        fn handle(&self) -> &ThreadHandle {
+        fn handle(&self) -> &Handle {
             &self.handle
         }
     }
 
     impl Test {
         fn new() -> Self {
-            Test { handle: ThreadHandle::new() }
+            Test { handle: Default::default() }
         }
         fn test_read(&self) {
             info!("test_read");
@@ -133,7 +209,7 @@ mod tests {
         let _ = WORKER.spin_up();
         let _ = WORKER.spin_up();
         WORKER.payload.test_read();
-        thread::sleep(Duration::from_millis(2000));
+        thread::sleep(Duration::from_millis(4000));
     }
 
     #[test]
@@ -151,18 +227,26 @@ mod tests {
         test_thread_forever();
     }
 
+    fn restart() {
+        let _ = WORKER.handle().set_cmd(Cmd::Restart);
+    }
+
+    #[test]
+    fn test_restart_1() {
+        restart();
+    }
 
     /// failure test
     #[derive(Clone)]
     pub struct TestFail {
-        handle: ThreadHandle,
+        handle: Handle,
     }
 
     impl Payload for TestFail {
         type Result = Result<()>;
 
         fn name(&self) -> String {
-            "thread_forever_test".to_string()
+            "TestFail".to_string()
         }
 
         fn thread_func(&self) -> Result<()> {
@@ -172,7 +256,7 @@ mod tests {
             Err(Error::from("error"))
         }
 
-        fn handle(&self) -> &ThreadHandle {
+        fn handle(&self) -> &Handle {
             &self.handle
         }
 
@@ -187,7 +271,7 @@ mod tests {
 
     impl TestFail {
         fn new() -> Self {
-            TestFail { handle: ThreadHandle::new() }
+            TestFail { handle: Default::default() }
         }
     }
 
