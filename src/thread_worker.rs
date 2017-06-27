@@ -33,7 +33,7 @@ impl<T> ThreadWorker<T>
 
         let payload = payload.clone();
         let name_clone = name.clone();
-        let thread_result = thread::Builder::new()
+        let _ = thread::Builder::new()
             .name(format!("t:{}", name))
             .spawn(move || -> Result<()> {
                 loop {
@@ -128,10 +128,10 @@ mod tests {
 
     fn test_thread_forever() {
         let _ = env_logger::init();
-        WORKER.spin_up();
-        WORKER.spin_up();
-        WORKER.spin_up();
-        WORKER.spin_up();
+        let _ = WORKER.spin_up();
+        let _ = WORKER.spin_up();
+        let _ = WORKER.spin_up();
+        let _ = WORKER.spin_up();
         WORKER.payload.test_read();
         thread::sleep(Duration::from_millis(2000));
     }
@@ -193,10 +193,10 @@ mod tests {
 
     fn test_thread_forever_fail() {
         let _ = env_logger::init();
-        WORKER_FAIL.spin_up();
-        WORKER_FAIL.spin_up();
-        WORKER_FAIL.spin_up();
-        WORKER_FAIL.spin_up();
+        let _ = WORKER_FAIL.spin_up();
+        let _ = WORKER_FAIL.spin_up();
+        let _ = WORKER_FAIL.spin_up();
+        let _ = WORKER_FAIL.spin_up();
         thread::sleep(Duration::from_millis(4000));
     }
 
