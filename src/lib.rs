@@ -14,7 +14,7 @@ mod thread_handle;
 mod thread_worker;
 mod errors;
 pub use errors::*;
-pub use thread_worker::{ThreadWorker, Handle};
+pub use thread_worker::{ThreadWorker, Handle, Status, SetCmdResult};
 pub use thread_handle::ThreadHandle;
 
 #[derive(Debug)]

@@ -9,6 +9,12 @@ use std::sync::RwLock;
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use ::Cmd;
 
+#[derive(Debug, Clone)]
+pub enum Status {
+    Down,
+    Up,
+}
+
 pub struct ThreadWorker<T> {
     pub payload: T,
     name: String,
@@ -35,6 +41,8 @@ impl<T> ThreadWorker<T>
             info!("t:{} inited, no-op", name);
             return Ok(());
         }
+
+        self.handle().set_status(Status::Up)?;
 
         let payload = payload.clone();
         let name_clone = name.clone();
@@ -98,6 +106,13 @@ impl<T> RW<T> for RwLock<T> {
 pub struct Handle {
     handle: ThreadHandle,
     cmd: Arc<RwLock<Cmd>>,
+    status: Arc<RwLock<Status>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SetCmdResult {
+    Noop,
+    Set,
 }
 
 impl Handle {
@@ -105,6 +120,7 @@ impl Handle {
         Handle {
             handle: ThreadHandle::new(),
             cmd: Arc::new(RwLock::new(Cmd::Noop)),
+            status: Arc::new(RwLock::new(Status::Down)),
         }
     }
     pub fn wait_for_thread_up(&self) {
@@ -119,9 +135,29 @@ impl Handle {
         self.handle.thread_need_init()
     }
 
-    pub fn set_cmd(&self, cmd: Cmd) -> Result<()> {
-        *self.cmd.write_lock() = cmd;
+    pub fn status(&self) -> Status {
+        self.status.read_lock().clone()
+    }
+
+    pub fn set_status(&self, status: Status) -> Result<()> {
+        *self.status.write_lock() = status;
         Ok(())
+    }
+
+    pub fn set_cmd(&self, cmd: Cmd) -> Result<SetCmdResult> {
+        match cmd {
+            Cmd::Restart => {
+                match self.status() {
+                    Status::Up => *self.cmd.write_lock() = cmd,
+                    Status::Down => {
+                        info!("status is down and set_cmd is noop");
+                        return Ok(SetCmdResult::Noop)
+                    }
+                }
+            }
+            Cmd::Noop => *self.cmd.write_lock() = cmd,
+        }
+        Ok(SetCmdResult::Set)
     }
 
     pub fn check_and_reset_cmd(&self) -> Cmd {
@@ -204,11 +240,14 @@ mod tests {
 
     fn test_thread_forever() {
         let _ = env_logger::init();
+        restart();
+        status();
         let _ = WORKER.spin_up();
         let _ = WORKER.spin_up();
         let _ = WORKER.spin_up();
         let _ = WORKER.spin_up();
         WORKER.payload.test_read();
+        status();
         thread::sleep(Duration::from_millis(4000));
     }
 
@@ -229,6 +268,11 @@ mod tests {
 
     fn restart() {
         let _ = WORKER.handle().set_cmd(Cmd::Restart);
+    }
+
+    fn status() {
+        let status = WORKER.handle().status();
+        info!("status: {:?}", status);
     }
 
     #[test]
