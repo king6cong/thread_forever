@@ -7,6 +7,7 @@ enum ThreadStatus {
     Uninitialized,
     Pending,
     Up,
+    Aborting,
 }
 
 #[derive(Clone)]
@@ -53,12 +54,23 @@ impl ThreadHandle {
         cvar.notify_all();
     }
 
+    pub fn set_thread_aborting(&self) {
+        let (ref lock, _) = *self.status;
+        let mut status = lock.lock().unwrap();
+        *status = ThreadStatus::Aborting;
+        trace!("set thread aborting");
+    }
+
     /// return false if init is already done
     pub fn thread_need_init(&self) -> bool {
         let (ref lock, ref cvar) = *self.status;
         let mut status = lock.lock().unwrap();
         trace!("thread_need_init status: {:?}", *status);
         match *status {
+            ThreadStatus::Aborting => {
+                *status = ThreadStatus::Pending;
+                true
+            }
             ThreadStatus::Uninitialized => {
                 *status = ThreadStatus::Pending;
                 true
