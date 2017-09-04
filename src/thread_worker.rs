@@ -131,6 +131,10 @@ impl Handle {
         self.handle.notify_thread_up()
     }
 
+    pub fn set_thread_aborting(&self) {
+        self.handle.set_thread_aborting()
+    }
+
     pub fn thread_need_init(&self) -> bool {
         self.handle.thread_need_init()
     }
