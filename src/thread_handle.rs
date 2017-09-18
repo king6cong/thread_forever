@@ -3,11 +3,11 @@ use std::time::Duration;
 use std::sync::MutexGuard;
 
 #[derive(Debug, PartialEq)]
-enum ThreadStatus {
-    Uninitialized,
+pub enum ThreadStatus {
     Pending,
     Up,
     Aborting,
+    Down,
 }
 
 #[derive(Clone)]
@@ -18,10 +18,10 @@ pub struct ThreadHandle {
 /// Guarantee that one and only one thread is up
 impl ThreadHandle {
     pub fn new() -> Self {
-        ThreadHandle { status: Arc::new((Mutex::new(ThreadStatus::Uninitialized), Condvar::new())) }
+        ThreadHandle { status: Arc::new((Mutex::new(ThreadStatus::Down), Condvar::new())) }
     }
 
-    fn wait(mut status: MutexGuard<ThreadStatus>, cvar: &Condvar) {
+    fn wait<'a>(mut status: MutexGuard<'a, ThreadStatus>, cvar: &Condvar) -> MutexGuard<'a, ThreadStatus> {
         loop {
             let result = cvar.wait_timeout(status, Duration::from_millis(10))
                 .unwrap();
@@ -29,11 +29,13 @@ impl ThreadHandle {
                    result,
                    *result.0);
             status = result.0;
-            if let ThreadStatus::Up = *status {
-                trace!("wait_for_thread_up: exit");
-                break;
+            match *status {
+                ThreadStatus::Up => break,
+                ThreadStatus::Down => break,
+                _ => continue
             }
         }
+        status
     }
 
     pub fn wait_for_thread_up(&self) {
@@ -41,7 +43,7 @@ impl ThreadHandle {
         let status = lock.lock().unwrap();
         trace!("wait_for_thread_up: enter");
 
-        Self::wait(status, cvar);
+        let _ = Self::wait(status, cvar);
 
         trace!("wait_for_thread_up: exit");
     }
@@ -61,29 +63,44 @@ impl ThreadHandle {
         trace!("set thread aborting");
     }
 
+    pub fn set_thread_down(&self) {
+        let (ref lock, _) = *self.status;
+        let mut status = lock.lock().unwrap();
+        if let ThreadStatus::Aborting = *status {
+            *status = ThreadStatus::Down
+        }
+        trace!("set thread down");
+    }
+
     /// return false if init is already done
-    pub fn thread_need_init(&self) -> bool {
+    pub fn thread_guard(&self) -> bool {
         let (ref lock, ref cvar) = *self.status;
         let mut status = lock.lock().unwrap();
-        trace!("thread_need_init status: {:?}", *status);
+        trace!("thread current status: {:?}", *status);
         match *status {
             ThreadStatus::Aborting => {
+                trace!("aborting wait 0");
+                let mut status = Self::wait(status, cvar);
+                trace!("aborting wait 1");
                 *status = ThreadStatus::Pending;
                 true
             }
-            ThreadStatus::Uninitialized => {
+            ThreadStatus::Down => {
                 *status = ThreadStatus::Pending;
                 true
             }
             ThreadStatus::Pending => {
                 trace!("pending wait 0");
-
-                Self::wait(status, cvar);
-
+                let _ = Self::wait(status, cvar);
                 trace!("pending wait 1");
                 false
-            }
+            },
             ThreadStatus::Up => false,
         }
+    }
+
+    pub fn status(&self) -> MutexGuard<ThreadStatus> {
+        let (ref lock, _) = *self.status;
+        lock.lock().unwrap()
     }
 }

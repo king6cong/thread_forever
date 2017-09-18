@@ -1,4 +1,6 @@
 #[cfg(test)]
+extern crate rand;
+#[cfg(test)]
 #[macro_use]
 extern crate lazy_static;
 
@@ -14,7 +16,7 @@ mod thread_handle;
 mod thread_worker;
 mod errors;
 pub use errors::*;
-pub use thread_worker::{ThreadWorker, Handle, Status, SetCmdResult};
+pub use thread_worker::{ThreadWorker, Handle, SetCmdResult};
 pub use thread_handle::ThreadHandle;
 
 #[derive(Debug)]
@@ -43,6 +45,11 @@ pub trait Payload {
         trace!("on_exit: {:?} retry: {:?}", result, retry);
         retry
     }
+
+    #[cfg(test)]
+    fn send_enter(&self, id: &str);
+    #[cfg(test)]
+    fn send_exit(&self, id: &str, is_spin_up: bool);
 }
 
 #[cfg(test)]
