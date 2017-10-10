@@ -3,17 +3,11 @@ use std::time::Duration;
 pub use errors::*;
 use {Payload, RetryMethod};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use thread_handle::ThreadHandle;
+use thread_handle::{ThreadHandle, ThreadStatus};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 use ::Cmd;
-
-#[derive(Debug, Clone)]
-pub enum Status {
-    Down,
-    Up,
-}
 
 pub struct ThreadWorker<T> {
     pub payload: T,
@@ -37,12 +31,22 @@ impl<T> ThreadWorker<T>
         let payload = self.payload.clone();
         let name = self.name.clone();
 
-        if !self.handle().thread_need_init() {
+        #[cfg(test)]
+        let unique_id = {
+            use rand::{Rng, thread_rng};
+            thread_rng().gen_ascii_chars().take(10).collect::<String>()
+        };
+        #[cfg(test)]
+        self.payload.send_enter(&unique_id);
+        if !self.handle().thread_guard() {
             info!("t:{} inited, no-op", name);
+            #[cfg(test)]
+            self.payload.send_exit(&unique_id, false);
             return Ok(());
         }
+        #[cfg(test)]
+        self.payload.send_exit(&unique_id, true);
 
-        self.handle().set_status(Status::Up)?;
 
         let payload = payload.clone();
         let name_clone = name.clone();
@@ -73,6 +77,7 @@ impl<T> ThreadWorker<T>
                         }
                     }
                 }
+                payload.handle().set_thread_down();
 
                 Ok(())
             })?;
@@ -83,6 +88,18 @@ impl<T> ThreadWorker<T>
 
     pub fn handle(&self) -> &Handle {
         self.payload.handle()
+    }
+
+    pub fn restart(&self) -> Result<()> {
+        let name = self.name.clone();
+        if self.handle().is_running() {
+            self.handle().set_cmd(Cmd::Restart)?;
+            trace!("thread {:?} set cmd restart success", name);
+        } else {
+            self.spin_up()?;
+            trace!("spin up thread {:?} success", name);
+        }
+        Ok(())
     }
 }
 
@@ -106,7 +123,6 @@ impl<T> RW<T> for RwLock<T> {
 pub struct Handle {
     handle: ThreadHandle,
     cmd: Arc<RwLock<Cmd>>,
-    status: Arc<RwLock<Status>>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,7 +136,6 @@ impl Handle {
         Handle {
             handle: ThreadHandle::new(),
             cmd: Arc::new(RwLock::new(Cmd::Noop)),
-            status: Arc::new(RwLock::new(Status::Down)),
         }
     }
     pub fn wait_for_thread_up(&self) {
@@ -135,26 +150,30 @@ impl Handle {
         self.handle.set_thread_aborting()
     }
 
-    pub fn thread_need_init(&self) -> bool {
-        self.handle.thread_need_init()
+    pub fn set_thread_down(&self) {
+        self.handle.set_thread_down()
     }
 
-    pub fn status(&self) -> Status {
-        self.status.read_lock().clone()
+    pub fn thread_guard(&self) -> bool {
+        self.handle.thread_guard()
     }
 
-    pub fn set_status(&self, status: Status) -> Result<()> {
-        *self.status.write_lock() = status;
-        Ok(())
+    pub fn is_running(&self) -> bool {
+        match *self.handle.status() {
+            ThreadStatus::Up => true,
+            ThreadStatus::Pending => true,
+            ThreadStatus::Aborting => false,
+            ThreadStatus::Down => false
+        }
     }
 
-    pub fn set_cmd(&self, cmd: Cmd) -> Result<SetCmdResult> {
+    fn set_cmd(&self, cmd: Cmd) -> Result<SetCmdResult> {
         match cmd {
             Cmd::Restart => {
-                match self.status() {
-                    Status::Up => *self.cmd.write_lock() = cmd,
-                    Status::Down => {
-                        info!("status is down and set_cmd is noop");
+                match self.is_running() {
+                    true => *self.cmd.write_lock() = cmd,
+                    false => {
+                        info!("current thread need spin up, set cmd to noop");
                         return Ok(SetCmdResult::Noop)
                     }
                 }
@@ -187,31 +206,84 @@ mod tests {
     extern crate env_logger;
     #[allow(unused_imports)]
     use super::*;
+    use std::time::Instant;
+    use std::sync::mpsc::{Sender, Receiver, channel};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
-    lazy_static! {
-        pub static ref WORKER: ThreadWorker<Test> = {
-            let payload = Test::new();
-            let worker = ThreadWorker::new(payload);
-            worker
-        };
+    #[macro_use]
+    mod macros {
+        macro_rules! run_worker {
+            ($name:ident, $action:ident, $times:expr) => {
+                thread::spawn(|| {
+                    for _ in 0..$times {
+                        let _ = $name.$action();
+                    }
+                });
+            };
+        }
 
-        pub static ref WORKER_FAIL: ThreadWorker<TestFail> = {
-            let payload = TestFail::new();
-            let worker = ThreadWorker::new(payload);
-            worker
-        };
+        macro_rules! new_worker {
+            ($name:ident, $is_success:expr) => {
+                lazy_static! {
+                    pub static ref $name: ThreadWorker<Test> = {
+                        let payload = Test::new($is_success);
+                        let worker = ThreadWorker::new(payload);
+                        worker
+                    };
+                }
+            };
+        }
+
+        macro_rules! increase_and_check {
+            ($var:ident, $max_value:expr) => {
+                $var = $var + 1;
+                if $var == $max_value {
+                    break;
+                }
+            };
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum Signal {
+        Enter,
+        Exit(bool, Instant),
+        Restart,
+        Abort
+    }
+
+    pub struct Data {
+        id: String,
+        signal: Signal,
+    }
+
+    pub fn send_enter(tx: &MutexGuard<Sender<Data>>, id: &str) {
+        let _ = tx.send(Data {
+            id: id.to_string(),
+            signal: Signal::Enter
+        });
+    }
+
+    pub fn send_exit(tx: &MutexGuard<Sender<Data>>, is_spin_up: bool, id: &str) {
+        let _ = tx.send(Data{
+            id: id.to_string(),
+            signal: Signal::Exit(is_spin_up, Instant::now())
+        });
     }
 
     #[derive(Clone)]
     pub struct Test {
         handle: Handle,
+        tx: Arc<Mutex<Sender<Data>>>,
+        rx: Arc<Mutex<Receiver<Data>>>,
+        is_success: bool
     }
 
     impl Payload for Test {
         type Result = Result<()>;
 
         fn name(&self) -> String {
-            "Test".to_string()
+            String::from("Test")
         }
 
         fn thread_func(&self) -> Result<()> {
@@ -221,9 +293,38 @@ mod tests {
                 thread::sleep(Duration::from_millis(100));
                 let cmd = self.handle.check_and_reset_cmd();
                 info!("iter, cmd: {:?}", cmd);
-                match cmd {
-                    Cmd::Restart => return Ok(()),
-                    _ => {},
+                if self.is_success {
+                    match cmd {
+                        Cmd::Restart => {
+                            let _ = self.tx.lock().unwrap().send(Data {
+                                id: String::from("restart"),
+                                signal: Signal::Restart
+                            });
+                            return Ok(())
+                        },
+                        _ => {},
+                    }
+                } else {
+                    return Err(Error::from("error"))
+                }
+            }
+        }
+
+        fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
+            trace!("on_exit: {:?}", result);
+            match *result {
+                Ok(Err(_)) => {
+                    self.handle().set_thread_aborting();
+                    let _ = self.tx.lock().unwrap().send(Data {
+                        id: String::from("abort"),
+                        signal: Signal::Abort
+                    });
+                    RetryMethod::Abort
+                }
+                _ => {
+                    RetryMethod::Retry {
+                        after: Duration::from_millis(200)
+                    }
                 }
             }
         }
@@ -231,120 +332,178 @@ mod tests {
         fn handle(&self) -> &Handle {
             &self.handle
         }
+        fn send_enter(&self, id: &str) {
+            send_enter(&self.tx.lock().unwrap(), id);
+        }
+
+        fn send_exit(&self, id: &str, is_spin_up: bool) {
+            send_exit(&self.tx.lock().unwrap(), is_spin_up, id);
+        }
     }
 
     impl Test {
-        fn new() -> Self {
-            Test { handle: Default::default() }
+        fn new(is_success: bool) -> Self {
+            let (tx, rx) = channel();
+            Test {
+                handle: Default::default(),
+                tx: Arc::new(Mutex::new(tx)),
+                rx: Arc::new(Mutex::new(rx)),
+                is_success: is_success
+            }
         }
-        fn test_read(&self) {
-            info!("test_read");
+
+        fn get_rx(&self) -> MutexGuard<Receiver<Data>> {
+            self.rx.lock().unwrap()
         }
     }
 
-    fn test_thread_forever() {
+    new_worker!(WORKER_SUCCESS, true);
+
+    #[test]
+    /// Test the thread_worker will be spin up only once
+    fn test_spin_up_once() {
         let _ = env_logger::init();
-        restart();
-        status();
-        let _ = WORKER.spin_up();
-        let _ = WORKER.spin_up();
-        let _ = WORKER.spin_up();
-        let _ = WORKER.spin_up();
-        WORKER.payload.test_read();
-        status();
-        thread::sleep(Duration::from_millis(4000));
+        run_worker!(WORKER_SUCCESS, spin_up, 2);
+        run_worker!(WORKER_SUCCESS, spin_up, 2);
+        run_worker!(WORKER_SUCCESS, spin_up, 2);
+
+        let mut spin_up_num = 0;
+        let mut skip_num = 0;
+        let rx = &*WORKER_SUCCESS.payload.get_rx();
+
+        let mut counter = 0;
+        for data in rx.iter() {
+            match data.signal {
+                Signal::Exit(true, _) => spin_up_num = spin_up_num + 1,
+                Signal::Exit(false, _) => skip_num = skip_num + 1,
+                _ => { continue }
+            }
+            increase_and_check!(counter, 6);
+        }
+        assert_eq!(spin_up_num, 1);
+        assert_eq!(skip_num, 5);
     }
+
+    new_worker!(WORKER_WAIT, true);
 
     #[test]
-    fn test_1() {
-        test_thread_forever();
-    }
-
-    #[test]
-    fn test_2() {
-        test_thread_forever();
-    }
-
-    #[test]
-    fn test_3() {
-        test_thread_forever();
-    }
-
-    fn restart() {
-        let _ = WORKER.handle().set_cmd(Cmd::Restart);
-    }
-
-    fn status() {
-        let status = WORKER.handle().status();
-        info!("status: {:?}", status);
-    }
-
-    #[test]
-    fn test_restart_1() {
-        restart();
-    }
-
-    /// failure test
-    #[derive(Clone)]
-    pub struct TestFail {
-        handle: Handle,
-    }
-
-    impl Payload for TestFail {
-        type Result = Result<()>;
-
-        fn name(&self) -> String {
-            "TestFail".to_string()
-        }
-
-        fn thread_func(&self) -> Result<()> {
-            self.handle.notify_thread_up();
-            // panic!("panic test");
-            // Ok(())
-            Err(Error::from("error"))
-        }
-
-        fn handle(&self) -> &Handle {
-            &self.handle
-        }
-
-        fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
-            trace!("on_exit: {:?}", result);
-            // panic!("panic test");
-            // let retry = RetryMethod::Retry { after: Duration::from_millis(1000) };
-            let retry = RetryMethod::Abort;
-            retry
-        }
-    }
-
-    impl TestFail {
-        fn new() -> Self {
-            TestFail { handle: Default::default() }
-        }
-    }
-
-    fn test_thread_forever_fail() {
+    /// Test first call spin up worker will exit spin up first
+    fn test_spin_up_wait() {
         let _ = env_logger::init();
-        let _ = WORKER_FAIL.spin_up();
-        let _ = WORKER_FAIL.spin_up();
-        let _ = WORKER_FAIL.spin_up();
-        let _ = WORKER_FAIL.spin_up();
-        thread::sleep(Duration::from_millis(4000));
+        run_worker!(WORKER_WAIT, spin_up, 1);
+        run_worker!(WORKER_WAIT, spin_up, 1);
+
+        let mut first_in = None;
+        let mut second_in = None;
+        let mut first_out_time = None;
+        let mut second_out_time = None;
+        let rx = &*WORKER_WAIT.payload.get_rx();
+        let mut counter = 0;
+        for data in rx.iter() {
+            let Data { id, signal } = data;
+            match signal {
+                Signal::Enter => {
+                    match first_in {
+                        Some(_) => second_in = Some(id),
+                        None => first_in = Some(id),
+                    }
+                }
+                 Signal::Exit(is_spin_up, time) => {
+                    let name = Some(id);
+                    if name == first_in {
+                        first_out_time = Some(time);
+                        assert!(is_spin_up);
+                    } else if name == second_in {
+                        second_out_time = Some(time);
+                        assert!(!is_spin_up);
+                    } else {
+                        panic!("This is a Bug in Test");
+                    }
+                }
+                _ => { continue }
+            }
+            increase_and_check!(counter, 4);
+        }
+        assert!(first_out_time.unwrap().lt(&second_out_time.unwrap()));
     }
+
+    new_worker!(WORKER_RESTART, true);
 
     #[test]
-    fn test_fail_1() {
-        test_thread_forever_fail();
+    /// Test the restart will spin up current worker if worker is down
+    /// And will restart current worker if worker is up
+    fn test_restart_success() {
+        let _ = env_logger::init();
+        run_worker!(WORKER_RESTART, restart, 1);
+
+        let mut first_time = true;
+        let rx = &*WORKER_RESTART.payload.get_rx();
+        let mut counter = 0;
+        for data in rx.iter() {
+            match data.signal {
+                Signal::Exit(true, _) => {
+                    assert!(first_time);
+                    first_time = false;
+                    run_worker!(WORKER_RESTART, restart, 1);
+                }
+                Signal::Restart => {
+                    assert!(!first_time);
+                }
+                _ => { continue }
+            }
+            increase_and_check!(counter, 2);
+        }
     }
+
+    new_worker!(WORKER_FAIL, false);
 
     #[test]
-    fn test_fail_2() {
-        test_thread_forever_fail();
+    /// Test aborted work can be spin up
+    fn test_fail_worker_spin_up() {
+        let _ = env_logger::init();
+        run_worker!(WORKER_FAIL, spin_up, 1);
+
+        let mut spin_up_time = 0;
+        let rx = &*WORKER_FAIL.payload.get_rx();
+        let mut counter = 0;
+        for data in rx.iter() {
+            match data.signal {
+                Signal::Exit(true, _)=> {
+                    spin_up_time = spin_up_time + 1;
+                }
+                Signal::Abort => {
+                    run_worker!(WORKER_FAIL, spin_up, 1);
+                }
+                _ => { continue }
+            }
+            increase_and_check!(counter, 4);
+        }
+        assert_eq!(spin_up_time, 2);
     }
+
+    new_worker!(WORKER_FAIL2, false);
 
     #[test]
-    fn test_fail_3() {
-        test_thread_forever_fail();
-    }
+    /// Test restart will spin up aborted worker
+    fn test_fail_worker_restart() {
+        let _ = env_logger::init();
+        run_worker!(WORKER_FAIL2, spin_up, 1);
 
+        let mut spin_up_num = 0;
+        let rx = &*WORKER_FAIL2.payload.get_rx();
+        let mut counter = 0;
+        for data in rx.iter() {
+            match data.signal {
+                Signal::Exit(true, _) => {
+                    spin_up_num = spin_up_num + 1;
+                }
+                Signal::Abort => {
+                    run_worker!(WORKER_FAIL2, restart, 1);
+                }
+                _ => { continue }
+            }
+            increase_and_check!(counter, 4);
+        }
+        assert_eq!(spin_up_num, 2);
+    }
 }
