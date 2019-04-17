@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::Arc;
 use std::time::Duration;
-use std::sync::MutexGuard;
+use parking_lot::{Mutex, MutexGuard, Condvar};
+
 
 #[derive(Debug, PartialEq)]
 pub enum ThreadStatus {
@@ -23,12 +24,8 @@ impl ThreadHandle {
 
     fn wait<'a>(mut status: MutexGuard<'a, ThreadStatus>, cvar: &Condvar) -> MutexGuard<'a, ThreadStatus> {
         loop {
-            let result = cvar.wait_timeout(status, Duration::from_millis(10))
-                .unwrap();
-            trace!("wait_for_thread_up: 10 ms passed: result: {:?} {:?}",
-                   result,
-                   *result.0);
-            status = result.0;
+            let result = cvar.wait_for(&mut status, Duration::from_millis(10));
+            trace!("wait_for_thread_up: 10 ms passed: result: {:?}", result);
             match *status {
                 ThreadStatus::Up => break,
                 ThreadStatus::Down => break,
@@ -40,7 +37,7 @@ impl ThreadHandle {
 
     pub fn wait_for_thread_up(&self) {
         let (ref lock, ref cvar) = *self.status.clone();
-        let status = lock.lock().unwrap();
+        let status = lock.lock();
         trace!("wait_for_thread_up: enter");
 
         let _ = Self::wait(status, cvar);
@@ -50,7 +47,7 @@ impl ThreadHandle {
 
     pub fn notify_thread_up(&self) {
         let (ref lock, ref cvar) = *self.status;
-        let mut status = lock.lock().unwrap();
+        let mut status = lock.lock();
         *status = ThreadStatus::Up;
         trace!("notify the condvar that thread is up.");
         cvar.notify_all();
@@ -58,14 +55,14 @@ impl ThreadHandle {
 
     pub fn set_thread_aborting(&self) {
         let (ref lock, _) = *self.status;
-        let mut status = lock.lock().unwrap();
+        let mut status = lock.lock();
         *status = ThreadStatus::Aborting;
         trace!("set thread aborting");
     }
 
     pub fn set_thread_down(&self) {
         let (ref lock, _) = *self.status;
-        let mut status = lock.lock().unwrap();
+        let mut status = lock.lock();
         if let ThreadStatus::Aborting = *status {
             *status = ThreadStatus::Down
         }
@@ -75,7 +72,7 @@ impl ThreadHandle {
     /// return false if init is already done
     pub fn thread_guard(&self) -> bool {
         let (ref lock, ref cvar) = *self.status;
-        let mut status = lock.lock().unwrap();
+        let mut status = lock.lock();
         trace!("thread current status: {:?}", *status);
         match *status {
             ThreadStatus::Aborting => {
@@ -101,6 +98,6 @@ impl ThreadHandle {
 
     pub fn status(&self) -> MutexGuard<ThreadStatus> {
         let (ref lock, _) = *self.status;
-        lock.lock().unwrap()
+        lock.lock()
     }
 }

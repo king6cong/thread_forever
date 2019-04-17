@@ -1,12 +1,11 @@
+use std::io;
 use std::thread;
 use std::time::Duration;
-pub use errors::*;
 use {Payload, RetryMethod};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use thread_handle::{ThreadHandle, ThreadStatus};
 use std::sync::Arc;
-use std::sync::RwLock;
-use std::sync::{RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::RwLock;
 use ::Cmd;
 
 pub struct ThreadWorker<T> {
@@ -20,59 +19,59 @@ impl<T> ThreadWorker<T>
     where T: Payload + Clone + Send + Sync + 'static
 {
     pub fn new(payload: T) -> Self {
-        let name = payload.name();
+        let name = payload.name().clone();
         ThreadWorker {
             payload: payload,
             name: name,
         }
     }
 
-    pub fn spin_up(&self) -> Result<()> {
+    pub fn spin_up(&self) -> io::Result<()> {
         let payload = self.payload.clone();
-        let name = self.name.clone();
 
         #[cfg(test)]
         let unique_id = {
-            use rand::{Rng, thread_rng};
-            thread_rng().gen_ascii_chars().take(10).collect::<String>()
+            use rand::{Rng, thread_rng, distributions::Alphanumeric};
+            thread_rng().sample_iter(&Alphanumeric).take(10).collect::<String>()
         };
+
         #[cfg(test)]
         self.payload.send_enter(&unique_id);
+
         if !self.handle().thread_guard() {
-            info!("t:{} inited, no-op", name);
+            info!("t:{} inited, no-op", self.name);
             #[cfg(test)]
             self.payload.send_exit(&unique_id, false);
             return Ok(());
         }
+
         #[cfg(test)]
         self.payload.send_exit(&unique_id, true);
 
-
-        let payload = payload.clone();
-        let name_clone = name.clone();
+        let name = self.name.clone();
         let _ = thread::Builder::new()
-            .name(format!("t:{}", name))
-            .spawn(move || -> Result<()> {
+            .name(format!("t:{}", self.name))
+            .spawn(move || -> io::Result<()> {
                 loop {
                     let result = catch_unwind(AssertUnwindSafe(|| payload.thread_func()));
                     let retry_method = catch_unwind(AssertUnwindSafe(|| payload.on_exit(&result)));
 
                     info!("t:{} <thread_func> exited: <{:?}> retry_method: <{:?}>",
-                          name_clone,
+                          name,
                           result,
                           retry_method);
 
                     match retry_method {
                         Ok(RetryMethod::Retry { after }) => {
-                            info!("t:{} retry in: {:?}", name_clone, after);
+                            info!("t:{} retry in: {:?}", name, after);
                             thread::sleep(after);
                         }
                         Ok(RetryMethod::Abort) => {
-                            error!("t:{} aborted", name_clone);
+                            error!("t:{} aborted", name);
                             break;
                         }
                         Err(e) => {
-                            error!("t:{}: <on_exit> panicked: {:?}", name_clone, e);
+                            error!("t:{}: <on_exit> panicked: {:?}", name, e);
                             thread::sleep(Duration::from_millis(DEFAULT_SLEEP));
                         }
                     }
@@ -90,32 +89,15 @@ impl<T> ThreadWorker<T>
         self.payload.handle()
     }
 
-    pub fn restart(&self) -> Result<()> {
-        let name = self.name.clone();
+    pub fn restart(&self) -> io::Result<()> {
         if self.handle().is_running() {
             self.handle().set_cmd(Cmd::Restart)?;
-            trace!("thread {:?} set cmd restart success", name);
+            trace!("thread {:?} set cmd restart success", self.name);
         } else {
             self.spin_up()?;
-            trace!("spin up thread {:?} success", name);
+            trace!("spin up thread {:?} success", self.name);
         }
         Ok(())
-    }
-}
-
-pub trait RW<T> {
-    fn read_lock(&self) -> RwLockReadGuard<T>;
-    fn write_lock(&self) -> RwLockWriteGuard<T>;
-}
-
-impl<T> RW<T> for RwLock<T> {
-    fn read_lock(&self) -> RwLockReadGuard<T> {
-        self.read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-    fn write_lock(&self) -> RwLockWriteGuard<T> {
-        self.write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -167,28 +149,28 @@ impl Handle {
         }
     }
 
-    fn set_cmd(&self, cmd: Cmd) -> Result<SetCmdResult> {
+    fn set_cmd(&self, cmd: Cmd) -> io::Result<SetCmdResult> {
         match cmd {
             Cmd::Restart => {
                 match self.is_running() {
-                    true => *self.cmd.write_lock() = cmd,
+                    true => *self.cmd.write() = cmd,
                     false => {
                         info!("current thread need spin up, set cmd to noop");
                         return Ok(SetCmdResult::Noop)
                     }
                 }
             }
-            Cmd::Noop => *self.cmd.write_lock() = cmd,
+            Cmd::Noop => *self.cmd.write() = cmd,
         }
         Ok(SetCmdResult::Set)
     }
 
     pub fn check_and_reset_cmd(&self) -> Cmd {
         trace!("CHECK_CMD: {:?}", self.cmd);
-        let cmd = self.cmd.read_lock().clone();
+        let cmd = self.cmd.read().clone();
         match cmd {
             Cmd::Restart => {
-                *self.cmd.write_lock() = Cmd::Noop;
+                *self.cmd.write() = Cmd::Noop;
                 Cmd::Restart
             }
             _ => Cmd::Noop
@@ -204,11 +186,13 @@ impl Default for Handle {
 #[cfg(test)]
 mod tests {
     extern crate env_logger;
+
     #[allow(unused_imports)]
     use super::*;
+    use std::sync::Arc;
     use std::time::Instant;
     use std::sync::mpsc::{Sender, Receiver, channel};
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use parking_lot::{Mutex, MutexGuard};
 
     #[macro_use]
     mod macros {
@@ -280,13 +264,13 @@ mod tests {
     }
 
     impl Payload for Test {
-        type Result = Result<()>;
+        type Result = io::Result<()>;
 
         fn name(&self) -> String {
             String::from("Test")
         }
 
-        fn thread_func(&self) -> Result<()> {
+        fn thread_func(&self) -> io::Result<()> {
             self.handle.notify_thread_up();
 
             loop {
@@ -296,7 +280,7 @@ mod tests {
                 if self.is_success {
                     match cmd {
                         Cmd::Restart => {
-                            let _ = self.tx.lock().unwrap().send(Data {
+                            let _ = self.tx.lock().send(Data {
                                 id: String::from("restart"),
                                 signal: Signal::Restart
                             });
@@ -305,7 +289,7 @@ mod tests {
                         _ => {},
                     }
                 } else {
-                    return Err(Error::from("error"))
+                    return Err(io::Error::new(io::ErrorKind::Other, "error"))
                 }
             }
         }
@@ -315,7 +299,7 @@ mod tests {
             match *result {
                 Ok(Err(_)) => {
                     self.handle().set_thread_aborting();
-                    let _ = self.tx.lock().unwrap().send(Data {
+                    let _ = self.tx.lock().send(Data {
                         id: String::from("abort"),
                         signal: Signal::Abort
                     });
@@ -333,11 +317,11 @@ mod tests {
             &self.handle
         }
         fn send_enter(&self, id: &str) {
-            send_enter(&self.tx.lock().unwrap(), id);
+            send_enter(&self.tx.lock(), id);
         }
 
         fn send_exit(&self, id: &str, is_spin_up: bool) {
-            send_exit(&self.tx.lock().unwrap(), is_spin_up, id);
+            send_exit(&self.tx.lock(), is_spin_up, id);
         }
     }
 
@@ -353,7 +337,7 @@ mod tests {
         }
 
         fn get_rx(&self) -> MutexGuard<Receiver<Data>> {
-            self.rx.lock().unwrap()
+            self.rx.lock()
         }
     }
 
@@ -362,7 +346,7 @@ mod tests {
     #[test]
     /// Test the thread_worker will be spin up only once
     fn test_spin_up_once() {
-        let _ = env_logger::init();
+        let _ = env_logger::try_init();
         run_worker!(WORKER_SUCCESS, spin_up, 2);
         run_worker!(WORKER_SUCCESS, spin_up, 2);
         run_worker!(WORKER_SUCCESS, spin_up, 2);
@@ -389,7 +373,7 @@ mod tests {
     #[test]
     /// Test first call spin up worker will exit spin up first
     fn test_spin_up_wait() {
-        let _ = env_logger::init();
+        let _ = env_logger::try_init();
         run_worker!(WORKER_WAIT, spin_up, 1);
         run_worker!(WORKER_WAIT, spin_up, 1);
 
@@ -433,7 +417,7 @@ mod tests {
     /// Test the restart will spin up current worker if worker is down
     /// And will restart current worker if worker is up
     fn test_restart_success() {
-        let _ = env_logger::init();
+        let _ = env_logger::try_init();
         run_worker!(WORKER_RESTART, restart, 1);
 
         let mut first_time = true;
@@ -460,7 +444,7 @@ mod tests {
     #[test]
     /// Test aborted work can be spin up
     fn test_fail_worker_spin_up() {
-        let _ = env_logger::init();
+        let _ = env_logger::try_init();
         run_worker!(WORKER_FAIL, spin_up, 1);
 
         let mut spin_up_time = 0;
@@ -486,7 +470,7 @@ mod tests {
     #[test]
     /// Test restart will spin up aborted worker
     fn test_fail_worker_restart() {
-        let _ = env_logger::init();
+        let _ = env_logger::try_init();
         run_worker!(WORKER_FAIL2, spin_up, 1);
 
         let mut spin_up_num = 0;
