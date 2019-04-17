@@ -6,16 +6,13 @@ extern crate lazy_static;
 
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate error_chain;
+extern crate parking_lot;
 
 use std::fmt;
 use std::thread;
 use std::time::Duration;
 mod thread_handle;
 mod thread_worker;
-mod errors;
-pub use errors::*;
 pub use thread_worker::{ThreadWorker, Handle, SetCmdResult};
 pub use thread_handle::ThreadHandle;
 
@@ -33,9 +30,13 @@ pub enum Cmd {
 
 pub trait Payload {
     type Result: fmt::Debug;
+
     fn name(&self) -> String;
+
     fn thread_func(&self) -> Self::Result;
+
     fn handle(&self) -> &Handle;
+
     /// on_exit will be called with catch_unwind result of thread_func
     fn on_exit(&self, result: &thread::Result<Self::Result>) -> RetryMethod {
         let retry = match *result {
@@ -50,10 +51,4 @@ pub trait Payload {
     fn send_enter(&self, id: &str);
     #[cfg(test)]
     fn send_exit(&self, id: &str, is_spin_up: bool);
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {}
 }
